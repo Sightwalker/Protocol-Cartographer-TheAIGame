@@ -2,3 +2,5 @@
 .godot/
 /android/
 /ai_session.json
+__pycache__/
+*.py[cod]
