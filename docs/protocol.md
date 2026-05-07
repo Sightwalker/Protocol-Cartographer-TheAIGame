@@ -31,13 +31,14 @@ Applies one structured action and advances the game if the action is accepted.
 
 ```powershell
 python tools/protocol_cli.py act scan [target]
+python tools/protocol_cli.py act query [target]
 python tools/protocol_cli.py act simulate target
 python tools/protocol_cli.py act commit target
 python tools/protocol_cli.py act compress
 python tools/protocol_cli.py act fork
 ```
 
-If `scan`, `simulate`, or `commit` receives no target, the CLI resolves a default target when possible.
+If `query`, `scan`, `simulate`, or `commit` receives no target, the CLI resolves a default target when possible.
 
 ### `auto`
 
@@ -78,6 +79,15 @@ Example packet:
 }
 ```
 
+## Actions
+
+- `query`: asks one narrow question about a latent frontier node. It costs `2` energy, adds `1` memory, adds a small amount of entropy, and stores a partial hint on that node. Hints can include `type_hint`, `risk_band`, `signal_band`, and `payload_bias`.
+- `scan`: reveals one or more latent frontier nodes. It costs more than `query`, but exposes the full payload.
+- `simulate`: reduces uncertainty on a revealed frontier node and improves risk estimation before commit.
+- `commit`: integrates a revealed frontier node, moving the agent and applying that node's signal, risk, energy, and memory effects.
+- `compress`: reduces memory and entropy.
+- `fork`: reveals and simulates several promising frontier branches at once.
+
 ## Status Fields
 
 - `finished`: true when the run has ended.
@@ -105,6 +115,7 @@ Visible nodes include:
 - `revealed`: true if payload is visible.
 - `simulated`: true if uncertainty has been reduced.
 - `uncertainty`: remaining uncertainty.
+- `hints`: partial answers from `query`, when any exist.
 
 Revealed nodes also include:
 

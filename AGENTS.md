@@ -22,6 +22,7 @@ python tools/protocol_cli.py new --seed 42
 
 ```powershell
 python tools/protocol_cli.py act scan
+python tools/protocol_cli.py act query 7
 python tools/protocol_cli.py act simulate 7
 python tools/protocol_cli.py act commit 7
 python tools/protocol_cli.py act compress
@@ -42,6 +43,7 @@ You descend by integrating keys or exhausting a frontier. You lose if coherence 
 
 ## Action Semantics
 
+- `query [target]`: ask one narrow question about a latent frontier node. Costs less than a scan and stores a partial hint.
 - `scan [target]`: reveal latent frontier nodes. Costs energy and memory.
 - `simulate target`: reduce uncertainty on a revealed frontier node. Costs energy and memory.
 - `commit target`: move into a revealed frontier node, gaining signal and payload effects while taking risk.
@@ -50,6 +52,7 @@ You descend by integrating keys or exhausting a frontier. You lose if coherence 
 
 ## Decision Hints
 
+- Prefer `query` when you want information about one suspicious latent node without paying the memory cost of a scan.
 - Prefer `simulate` before committing high-risk nodes.
 - `commit_utility` is a useful local heuristic, not a complete strategy.
 - Energy nodes can keep a run alive even when their immediate signal is low.

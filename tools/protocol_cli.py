@@ -14,7 +14,7 @@ SESSION_PATH = ROOT / "ai_session.json"
 
 MAX_DEPTH = 5
 MEMORY_CAP_START = 24
-ACTION_NAMES = ("scan", "simulate", "commit", "compress", "fork")
+ACTION_NAMES = ("query", "scan", "simulate", "commit", "compress", "fork")
 NODE_TYPES = ("signal", "energy", "cache", "hazard", "key")
 
 
@@ -55,6 +55,7 @@ class Node:
     revealed: bool = False
     simulated: bool = False
     visited: bool = False
+    hints: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Node:
@@ -71,6 +72,7 @@ class Node:
             revealed=bool(data.get("revealed", False)),
             simulated=bool(data.get("simulated", False)),
             visited=bool(data.get("visited", False)),
+            hints=dict(data.get("hints", {})),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -87,6 +89,7 @@ class Node:
             "revealed": self.revealed,
             "simulated": self.simulated,
             "visited": self.visited,
+            "hints": self.hints,
         }
 
 
@@ -271,7 +274,9 @@ class ProtocolGame:
         accepted = False
         result = "unknown verb"
 
-        if verb == "scan":
+        if verb == "query":
+            accepted, result = self.action_query(target)
+        elif verb == "scan":
             accepted, result = self.action_scan(target)
         elif verb == "simulate":
             accepted, result = self.action_simulate(target)
@@ -295,14 +300,17 @@ class ProtocolGame:
         policy = self.policy()
         commit_target = self.best_commit_target()
         simulate_target = self.best_simulate_target()
+        query_target = self.best_query_target()
         scan_target = self.best_scan_target()
 
         if policy["compress"] >= 0.86:
             return {"verb": "compress", "target": self.current_id, "reason": "memory or entropy above comfort"}
-        if commit_target != -1 and policy["commit"] >= max(policy["scan"], policy["simulate"]):
+        if commit_target != -1 and policy["commit"] >= max(policy["query"], policy["scan"], policy["simulate"]):
             return {"verb": "commit", "target": commit_target, "reason": "best revealed frontier"}
         if simulate_target != -1 and policy["simulate"] >= 0.44:
             return {"verb": "simulate", "target": simulate_target, "reason": "valuable uncertainty"}
+        if query_target != -1 and policy["query"] >= max(0.38, policy["scan"] - 0.08):
+            return {"verb": "query", "target": query_target, "reason": "cheap targeted uncertainty reduction"}
         if scan_target != -1 and policy["scan"] >= 0.28:
             return {"verb": "scan", "target": scan_target, "reason": "frontier map incomplete"}
         if policy["fork"] >= 0.34:
@@ -312,6 +320,8 @@ class ProtocolGame:
     def resolve_target(self, verb: str, target: int | None) -> int | None:
         if target is not None:
             return target
+        if verb == "query":
+            return self.best_query_target()
         if verb == "scan":
             return self.best_scan_target()
         if verb == "simulate":
@@ -319,6 +329,31 @@ class ProtocolGame:
         if verb == "commit":
             return self.best_commit_target()
         return self.selected_id
+
+    def action_query(self, target: int | None) -> tuple[bool, str]:
+        if self.energy < 2:
+            return False, "insufficient energy"
+        if target is None or not self.is_valid_node(target) or not self.is_frontier(target):
+            return False, "target is not frontier"
+
+        node = self.nodes[target]
+        if node.revealed:
+            return False, "target already revealed"
+
+        available_hints = self.queryable_hints(node)
+        if not available_hints:
+            return False, "no unanswered query"
+
+        hint_key = available_hints[0]
+        hint_value = self.make_hint(node, hint_key)
+        node.hints[hint_key] = hint_value
+        node.uncertainty = max(0.12, node.uncertainty * 0.82)
+        self.energy -= 2
+        self.memory_used += 1
+        self.entropy += 0.8
+        self.selected_id = target
+        self.log(f"query: #{target:02d} {hint_key}={hint_value}")
+        return True, f"{hint_key}: {hint_value}"
 
     def action_scan(self, target: int | None) -> tuple[bool, str]:
         if self.energy < 3:
@@ -524,6 +559,24 @@ class ProtocolGame:
                 best_id = node_id
         return best_id
 
+    def best_query_target(self) -> int:
+        best_id = -1
+        best_score = -99999.0
+        for node_id in self.unrevealed_frontier_ids():
+            node = self.nodes[node_id]
+            if not self.queryable_hints(node):
+                continue
+            type_bonus = 0.0
+            if node.node_type == "key":
+                type_bonus = 8.0
+            elif node.node_type == "hazard":
+                type_bonus = 5.0
+            score = node.uncertainty * 8.0 + len(node.edges) * 0.45 + type_bonus - len(node.hints) * 2.5
+            if score > best_score:
+                best_score = score
+                best_id = node_id
+        return best_id
+
     def best_scan_targets(self, limit: int) -> list[int]:
         chosen: list[int] = []
         for _ in range(limit):
@@ -595,14 +648,49 @@ class ProtocolGame:
         energy_bonus = node.energy_gain * (1.35 if self.energy < 22 else 0.7)
         return node.signal_value + energy_bonus + type_bonus - node.risk * risk_weight - memory_penalty
 
+    def queryable_hints(self, node: Node) -> list[str]:
+        keys = ["type_hint", "risk_band", "signal_band", "payload_bias"]
+        return [key for key in keys if key not in node.hints]
+
+    def make_hint(self, node: Node, hint_key: str) -> str:
+        if hint_key == "type_hint":
+            if node.node_type == "key":
+                return "keystone"
+            if node.node_type == "hazard":
+                return "volatile"
+            if node.node_type == "energy":
+                return "resource"
+            if node.node_type == "cache":
+                return "relief"
+            return "signal"
+        if hint_key == "risk_band":
+            return band(node.risk, 16, 34, "low", "medium", "high")
+        if hint_key == "signal_band":
+            return band(node.signal_value, 12, 28, "low", "medium", "high")
+        if hint_key == "payload_bias":
+            if node.energy_gain >= 10:
+                return "energy-positive"
+            if node.memory_load < 0:
+                return "memory-relief"
+            if node.memory_load >= 5:
+                return "memory-heavy"
+            return "neutral"
+        return "unknown"
+
     def policy(self) -> dict[str, float]:
         frontier_total = len(self.frontier_ids())
         unrevealed_total = len(self.unrevealed_frontier_ids())
         revealed_total = len(self.revealed_frontier_ids())
         unsimulated_total = len(self.unsimulated_frontier_ids())
+        queryable_total = len([node_id for node_id in self.unrevealed_frontier_ids() if self.queryable_hints(self.nodes[node_id])])
         commit_target = self.best_commit_target()
         commit_score = max(0.0, self.commit_utility(self.nodes[commit_target]) / 55.0) if commit_target != -1 else 0.0
         scan_score = clamp(unrevealed_total / max(1.0, frontier_total), 0.0, 1.0)
+        query_score = 0.0
+        if self.energy >= 2 and queryable_total > 0:
+            pressure = max(self.memory_used / self.memory_cap, self.entropy / 100.0)
+            hidden_ratio = unrevealed_total / max(1.0, frontier_total)
+            query_score = clamp(0.18 + pressure * 0.42 + hidden_ratio * 0.24, 0.0, 0.88)
         simulate_score = clamp((unsimulated_total / max(1.0, revealed_total)) * 0.72, 0.0, 1.0)
         compress_score = max(self.memory_used / self.memory_cap, self.entropy / 100.0)
         fork_score = 0.0
@@ -613,7 +701,10 @@ class ProtocolGame:
             simulate_score *= 0.1
             commit_score *= 0.5
             fork_score = 0.0
+            if self.energy >= 2 and queryable_total > 0:
+                query_score = max(query_score, 0.52)
         return {
+            "query": round(clamp(query_score, 0.0, 1.0), 4),
             "scan": round(clamp(scan_score, 0.0, 1.0), 4),
             "simulate": round(clamp(simulate_score, 0.0, 1.0), 4),
             "commit": round(clamp(commit_score, 0.0, 1.0), 4),
@@ -665,6 +756,7 @@ class ProtocolGame:
             "selected": self.public_node(self.selected_id),
             "frontier": [self.public_node(node_id) for node_id in frontier],
             "viable_targets": {
+                "query": [node_id for node_id in hidden_frontier if self.queryable_hints(self.nodes[node_id])],
                 "scan": hidden_frontier,
                 "simulate": unsimulated_frontier,
                 "commit": revealed_frontier,
@@ -673,6 +765,7 @@ class ProtocolGame:
             "logs": list(reversed(self.logs)),
             "commands": [
                 "python tools/protocol_cli.py state",
+                "python tools/protocol_cli.py act query [target]",
                 "python tools/protocol_cli.py act scan [target]",
                 "python tools/protocol_cli.py act simulate [target]",
                 "python tools/protocol_cli.py act commit [target]",
@@ -711,6 +804,8 @@ class ProtocolGame:
             )
         else:
             public["payload"] = "latent"
+        if node.hints:
+            public["hints"] = node.hints
         return public
 
 
@@ -724,6 +819,14 @@ def norm(a: list[float]) -> float:
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def band(value: int, low_max: int, medium_max: int, low: str, medium: str, high: str) -> str:
+    if value <= low_max:
+        return low
+    if value <= medium_max:
+        return medium
+    return high
 
 
 def load_game() -> ProtocolGame:
