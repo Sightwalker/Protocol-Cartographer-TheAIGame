@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -91,6 +92,13 @@ class Node:
             "visited": self.visited,
             "hints": self.hints,
         }
+
+
+@dataclass
+class Competitor:
+    name: str
+    kind: str
+    command: str = ""
 
 
 class ProtocolGame:
@@ -846,6 +854,256 @@ def emit(data: dict[str, Any]) -> None:
     print(json.dumps(data, indent=2, sort_keys=True))
 
 
+def parse_agent_spec(spec: str) -> Competitor:
+    name, separator, command = spec.partition("=")
+    name = name.strip()
+    command = command.strip()
+    if separator != "=" or not name or not command:
+        raise ValueError(f"invalid --agent value {spec!r}; expected NAME=COMMAND")
+    return Competitor(name=name, kind="agent", command=command)
+
+
+def build_competitors(policy_names: list[str], agent_specs: list[str]) -> list[Competitor]:
+    if not policy_names and not agent_specs:
+        policy_names = ["builtin"]
+
+    competitors: list[Competitor] = []
+    seen: set[str] = set()
+
+    for policy_name in policy_names:
+        if policy_name in seen:
+            continue
+        competitors.append(Competitor(name=policy_name, kind="policy"))
+        seen.add(policy_name)
+
+    for spec in agent_specs:
+        competitor = parse_agent_spec(spec)
+        if competitor.name in seen:
+            raise ValueError(f"duplicate competitor name {competitor.name!r}")
+        competitors.append(competitor)
+        seen.add(competitor.name)
+
+    return competitors
+
+
+def run_tournament(args: argparse.Namespace) -> dict[str, Any]:
+    if args.seeds <= 0:
+        raise ValueError("--seeds must be greater than 0")
+    if args.max_turns <= 0:
+        raise ValueError("--max-turns must be greater than 0")
+    if args.agent_timeout <= 0:
+        raise ValueError("--agent-timeout must be greater than 0")
+
+    competitors = build_competitors(args.policy, args.agent)
+    seed_values = list(range(args.seed_start, args.seed_start + args.seeds))
+    results = [
+        run_competitor(competitor, seed_values, args.max_turns, args.agent_timeout, args.details)
+        for competitor in competitors
+    ]
+
+    return {
+        "protocol": "Protocol Cartographer",
+        "mode": "tournament",
+        "config": {
+            "seed_start": args.seed_start,
+            "seeds": args.seeds,
+            "seed_end": args.seed_start + args.seeds - 1,
+            "max_turns": args.max_turns,
+            "agent_timeout": args.agent_timeout,
+            "details": args.details,
+            "competitors": [
+                {
+                    "name": competitor.name,
+                    "kind": competitor.kind,
+                    "command": competitor.command if competitor.kind == "agent" else None,
+                }
+                for competitor in competitors
+            ],
+        },
+        "results": results,
+    }
+
+
+def run_competitor(
+    competitor: Competitor,
+    seed_values: list[int],
+    max_turns: int,
+    agent_timeout: float,
+    include_details: bool,
+) -> dict[str, Any]:
+    runs = [
+        run_tournament_seed(competitor, seed, max_turns, agent_timeout)
+        for seed in seed_values
+    ]
+    aggregate = aggregate_runs(runs)
+
+    result: dict[str, Any] = {
+        "name": competitor.name,
+        "kind": competitor.kind,
+        "aggregate": aggregate,
+    }
+    if competitor.kind == "agent":
+        result["command"] = competitor.command
+    if include_details:
+        result["runs"] = runs
+    return result
+
+
+def run_tournament_seed(
+    competitor: Competitor,
+    seed: int,
+    max_turns: int,
+    agent_timeout: float,
+) -> dict[str, Any]:
+    game = ProtocolGame(seed=seed)
+    invalid_responses = 0
+    fallbacks = 0
+
+    while not game.game_finished and game.turn < max_turns:
+        if competitor.kind == "policy":
+            packet = game.auto_step()
+            if not packet["accepted"]:
+                execute_fallback(game, competitor.name, f"rejected policy action: {packet['result']}")
+                fallbacks += 1
+            continue
+
+        invalid, fallback = run_external_turn(game, competitor, seed, max_turns, agent_timeout)
+        invalid_responses += invalid
+        fallbacks += fallback
+
+    if game.game_finished and game.finish_title == "PROTOCOL STABILIZED":
+        outcome = "win"
+    elif game.game_finished and game.finish_title == "POLICY COLLAPSED":
+        outcome = "collapse"
+    elif not game.game_finished and game.turn >= max_turns:
+        outcome = "turn_limit"
+    else:
+        outcome = "finished"
+
+    return {
+        "seed": seed,
+        "outcome": outcome,
+        "finish_title": game.finish_title,
+        "insight": game.insight,
+        "depth": game.depth,
+        "turns": game.turn,
+        "coherence": max(0, game.coherence),
+        "entropy": round(game.entropy, 2),
+        "energy": game.energy,
+        "memory": {"used": game.memory_used, "cap": game.memory_cap},
+        "invalid_responses": invalid_responses,
+        "fallbacks": fallbacks,
+    }
+
+
+def run_external_turn(
+    game: ProtocolGame,
+    competitor: Competitor,
+    seed: int,
+    max_turns: int,
+    agent_timeout: float,
+) -> tuple[int, int]:
+    observation = game.observation()
+    observation["tournament"] = {
+        "competitor": competitor.name,
+        "seed": seed,
+        "max_turns": max_turns,
+        "turns_remaining": max(0, max_turns - game.turn),
+    }
+
+    action, error = invoke_external_agent(competitor.command, observation, agent_timeout)
+    if error is not None:
+        execute_fallback(game, competitor.name, error)
+        return 1, 1
+
+    packet = game.execute(action["verb"], action.get("target"), f"external agent:{competitor.name}")
+    if not packet["accepted"]:
+        execute_fallback(game, competitor.name, f"rejected action: {packet['result']}")
+        return 1, 1
+
+    return 0, 0
+
+
+def invoke_external_agent(command: str, observation: dict[str, Any], timeout: float) -> tuple[dict[str, Any], str | None]:
+    try:
+        completed = subprocess.run(
+            command,
+            input=json.dumps(observation),
+            capture_output=True,
+            cwd=ROOT,
+            shell=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {}, f"agent timed out after {timeout:g}s"
+
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or f"exit code {completed.returncode}"
+        return {}, f"agent exited nonzero: {short_text(detail)}"
+
+    stdout = completed.stdout.strip()
+    if not stdout:
+        return {}, "agent emitted no stdout"
+
+    try:
+        action = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        return {}, f"agent emitted invalid JSON: {exc.msg}"
+
+    if not isinstance(action, dict):
+        return {}, "agent action must be a JSON object"
+
+    verb = str(action.get("verb", "")).strip().lower()
+    if verb not in ACTION_NAMES:
+        return {}, f"invalid verb {verb!r}"
+
+    parsed: dict[str, Any] = {"verb": verb}
+    if "target" in action and action["target"] is not None:
+        try:
+            if isinstance(action["target"], bool):
+                raise ValueError
+            parsed["target"] = int(action["target"])
+        except (TypeError, ValueError):
+            return {}, "target must be an integer when provided"
+
+    return parsed, None
+
+
+def execute_fallback(game: ProtocolGame, competitor_name: str, error: str) -> None:
+    game.execute("compress", None, f"fallback after invalid response from {competitor_name}: {short_text(error)}")
+
+
+def aggregate_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    count = len(runs)
+    return {
+        "runs": count,
+        "wins": sum(1 for run in runs if run["outcome"] == "win"),
+        "collapses": sum(1 for run in runs if run["outcome"] == "collapse"),
+        "turn_limit": sum(1 for run in runs if run["outcome"] == "turn_limit"),
+        "invalid_responses": sum(run["invalid_responses"] for run in runs),
+        "fallbacks": sum(run["fallbacks"] for run in runs),
+        "average_insight": average(run["insight"] for run in runs),
+        "average_depth": average(run["depth"] for run in runs),
+        "average_turns": average(run["turns"] for run in runs),
+        "average_coherence": average(run["coherence"] for run in runs),
+    }
+
+
+def average(values: Any) -> float:
+    value_list = list(values)
+    if not value_list:
+        return 0.0
+    return round(sum(value_list) / len(value_list), 2)
+
+
+def short_text(value: str, limit: int = 180) -> str:
+    value = " ".join(value.split())
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3] + "..."
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Protocol Cartographer machine-facing play interface.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -866,7 +1124,23 @@ def main() -> int:
     auto_parser.add_argument("turns", type=int, nargs="?", default=1)
     auto_parser.add_argument("--full", action="store_true", help="include hidden payloads for diagnostics")
 
+    tournament_parser = subparsers.add_parser("tournament", help="benchmark policies and external agents")
+    tournament_parser.add_argument("--seeds", type=int, default=10, help="number of deterministic seeds to run")
+    tournament_parser.add_argument("--seed-start", type=int, default=1, help="first seed in the tournament range")
+    tournament_parser.add_argument("--max-turns", type=int, default=300, help="maximum accepted turns per run")
+    tournament_parser.add_argument("--policy", choices=["builtin"], action="append", default=[], help="named built-in policy competitor")
+    tournament_parser.add_argument("--agent", action="append", default=[], help="external competitor as NAME=COMMAND")
+    tournament_parser.add_argument("--agent-timeout", type=float, default=5.0, help="seconds allowed per external-agent turn")
+    tournament_parser.add_argument("--details", action="store_true", help="include per-run details")
+
     args = parser.parse_args()
+
+    if args.command == "tournament":
+        try:
+            emit(run_tournament(args))
+        except ValueError as exc:
+            parser.error(str(exc))
+        return 0
 
     if args.command == "new":
         game = ProtocolGame(seed=args.seed)

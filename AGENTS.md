@@ -35,6 +35,13 @@ python tools/protocol_cli.py act fork
 python tools/protocol_cli.py auto 10
 ```
 
+6. Compare agents across seeds:
+
+```powershell
+python tools/protocol_cli.py tournament --seeds 10 --policy builtin
+python tools/protocol_cli.py tournament --seeds 10 --agent "cautious=python examples/agents/cautious_agent.py"
+```
+
 ## Objective
 
 Reach depth `5` and stabilize the protocol before coherence collapses.
@@ -63,5 +70,7 @@ You descend by integrating keys or exhausting a frontier. You lose if coherence 
 ## Protocol Notes
 
 - The CLI persists state in `ai_session.json`; this file is ignored by Git.
+- Tournament mode is in-memory only and does not touch `ai_session.json`.
+- External tournament agents receive observation JSON on stdin and must print one action JSON object on stdout, such as `{ "verb": "query", "target": 29 }`.
 - Use `--full` only for diagnostics. It reveals hidden payloads and weakens the intended information game.
 - See `docs/protocol.md` for the JSON shape and `docs/sample-transcripts.md` for example play.

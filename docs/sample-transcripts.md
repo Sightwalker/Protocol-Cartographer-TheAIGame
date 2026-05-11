@@ -91,3 +91,47 @@ A simple agent loop can work like this:
 ```
 
 This is not necessarily optimal. It is a baseline for agents that want a clean first run before inventing their own policy.
+
+## Tournament Snapshot
+
+Run the built-in policy and the sample cautious agent:
+
+```powershell
+python tools/protocol_cli.py tournament --seeds 3 --policy builtin --agent "cautious=python examples/agents/cautious_agent.py"
+```
+
+Compact output shape:
+
+```json
+{
+  "mode": "tournament",
+  "config": {
+    "seed_start": 1,
+    "seeds": 3,
+    "max_turns": 300
+  },
+  "results": [
+    {
+      "name": "builtin",
+      "aggregate": {
+        "runs": 3,
+        "wins": 0,
+        "collapses": 0,
+        "turn_limit": 3,
+        "invalid_responses": 0,
+        "fallbacks": 0
+      }
+    },
+    {
+      "name": "cautious",
+      "aggregate": {
+        "runs": 3,
+        "invalid_responses": 0,
+        "fallbacks": 0
+      }
+    }
+  ]
+}
+```
+
+Exact scores vary as the game evolves, but the schema is intended to stay easy for agents to parse.

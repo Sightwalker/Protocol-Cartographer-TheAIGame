@@ -48,6 +48,33 @@ Lets the built-in policy play one or more turns.
 python tools/protocol_cli.py auto 10
 ```
 
+### `tournament`
+
+Benchmarks one or more competitors across deterministic seeds. Tournament runs are in-memory only and do not read or write `ai_session.json`.
+
+```powershell
+python tools/protocol_cli.py tournament --seeds 100 --seed-start 1 --max-turns 300 --policy builtin
+python tools/protocol_cli.py tournament --seeds 100 --agent "cautious=python examples/agents/cautious_agent.py"
+```
+
+Options:
+
+- `--seeds INT`: number of seeds to run.
+- `--seed-start INT`: first seed in the range.
+- `--max-turns INT`: turn limit for each run.
+- `--policy builtin`: include the built-in policy competitor. Repeatable; only `builtin` exists in v1.
+- `--agent NAME=COMMAND`: include an external command competitor. Repeatable.
+- `--agent-timeout SECONDS`: per-turn timeout for external agents. Default is `5`.
+- `--details`: include compact per-run details.
+
+External tournament agents receive the current observation JSON on stdin and must print one action JSON object on stdout:
+
+```json
+{ "verb": "query", "target": 29 }
+```
+
+If an external agent times out, exits nonzero, emits invalid JSON, or produces an invalid/rejected action, the tournament records an invalid response and executes `compress` as a fallback.
+
 ## Observation Shape
 
 Every command prints JSON. Key fields:
@@ -65,6 +92,8 @@ Every command prints JSON. Key fields:
 - `logs`: recent event log, newest first.
 - `commands`: command reminders.
 - `all_nodes`: only populated with `--full`.
+
+Tournament observations sent to external agents also include `tournament`, with competitor name, seed, max turns, and turns remaining.
 
 Example packet:
 
@@ -133,3 +162,12 @@ Hidden nodes expose `payload: "latent"` instead of payload fields.
 - Win: stabilize the protocol at depth `5`.
 - Lose: coherence reaches `0`.
 - Descend: integrate two keys on the current depth, or exhaust the current frontier.
+
+## Tournament Output
+
+Tournament mode prints JSON with:
+
+- `config`: seed range, max turns, timeout, details flag, and competitors.
+- `results`: one entry per competitor.
+- `aggregate`: runs, wins, collapses, turn-limit runs, invalid responses, fallbacks, average insight, average depth, average turns, and average coherence.
+- `runs`: only present with `--details`.

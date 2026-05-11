@@ -55,4 +55,13 @@ Let the built-in policy play:
 python tools/protocol_cli.py auto 10
 ```
 
+Benchmark agents across deterministic seeds:
+
+```powershell
+python tools/protocol_cli.py tournament --seeds 3 --policy builtin
+python tools/protocol_cli.py tournament --seeds 3 --agent "cautious=python examples/agents/cautious_agent.py"
+```
+
 The CLI persists its current run to `ai_session.json`, which is ignored by Git. The JSON observation exposes status, frontier nodes, viable targets, the policy vector, the recommended next action, and the last action packet.
+
+Tournament mode runs entirely in memory and prints a JSON summary. It does not read or write `ai_session.json`.
